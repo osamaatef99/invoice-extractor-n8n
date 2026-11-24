@@ -1,0 +1,251 @@
+{
+  "name": "Invoice Extractor (PDF to Google Sheet)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment filename:pdf subject:invoice"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "03313b42-3348-5086-9a9d-774d4969e9a2",
+      "name": "Gmail Trigger (invoices)",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "SET ME: Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "id": "800247e4-3a3a-5e5f-b890-16e12da924ee",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        240,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = String($json.text || '').replace(/\\s+/g, ' ').trim().slice(0, 6000);\nconst file = $('Gmail Trigger (invoices)').item.json.subject || 'invoice';\nif (!text) return [{ json: { file, text: '', empty: true } }];\nreturn [{ json: { file, text } }];"
+      },
+      "id": "683278cb-3957-598a-901b-0f97194d90ca",
+      "name": "Normalize Invoice Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model:'openai/gpt-oss-20b',temperature:0.2,response_format:{type:'json_object'},messages:[{role:'system',content:\"You extract invoice data from text. Return ONLY JSON with keys: vendor, invoice_number, invoice_date (YYYY-MM-DD or null), currency (3-letter or null), subtotal (number or null), tax (number or null), total (number or null). Use null when a field is not in the text. Never guess numbers.\"},{role:'user',content:$json.text}]}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "41986f5b-59cf-5643-aeea-badfc19597ef",
+      "name": "Groq: Extract Fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "",
+          "name": "SET ME: Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.choices?.[0]?.message?.content ?? '';\nconst src = $('Normalize Invoice Text').item.json;\nlet o; try { o = JSON.parse(raw); } catch (e) { o = null; }\nconst num = v => (v === null || v === undefined || v === '' || isNaN(Number(v))) ? null : Number(v);\nif (!o) return [{ json: { file: src.file, status: 'NEEDS REVIEW', note: 'AI output unreadable', vendor: '', invoice_number: '', invoice_date: '', currency: '', subtotal: null, tax: null, total: null } }];\nconst r = { file: src.file, vendor: o.vendor || '', invoice_number: o.invoice_number || '', invoice_date: o.invoice_date || '', currency: o.currency || '', subtotal: num(o.subtotal), tax: num(o.tax), total: num(o.total) };\nlet status = 'OK', note = '';\nif (r.total === null) { status = 'NEEDS REVIEW'; note = 'no total found'; }\nelse if (r.subtotal !== null && r.tax !== null && Math.abs(r.subtotal + r.tax - r.total) > 0.02) { status = 'NEEDS REVIEW'; note = 'subtotal + tax does not equal total'; }\nreturn [{ json: { ...r, status, note } }];"
+      },
+      "id": "f6fe6f6c-618f-5573-8882-b04cfe68ef59",
+      "name": "Parse + Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file": "={{ $json.file }}",
+            "vendor": "={{ $json.vendor }}",
+            "invoice_number": "={{ $json.invoice_number }}",
+            "invoice_date": "={{ $json.invoice_date }}",
+            "currency": "={{ $json.currency }}",
+            "subtotal": "={{ $json.subtotal }}",
+            "tax": "={{ $json.tax }}",
+            "total": "={{ $json.total }}",
+            "status": "={{ $json.status }}",
+            "note": "={{ $json.note }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      },
+      "id": "6fcb449c-4669-5d39-a929-9f2b9824b1f4",
+      "name": "Sheets: Append Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        200
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "SET ME: Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Invoice Extractor\nEmail with PDF invoice in, clean Sheet row out. Text PDFs only (scanned images need OCR, not included).",
+        "width": 480,
+        "height": 130,
+        "color": 4
+      },
+      "id": "d1c6d38c-d9f1-5cd6-a285-f91329f294a1",
+      "name": "Note: Invoice Extractor",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Checks\nParse + Validate flags rows where subtotal + tax does not equal total or total is missing, so a human reviews them.",
+        "width": 480,
+        "height": 130,
+        "color": 5
+      },
+      "id": "2632e107-0390-53c5-b209-2708194da36a",
+      "name": "Note: Checks",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        720,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger (invoices)": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Normalize Invoice Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Invoice Text": {
+      "main": [
+        [
+          {
+            "node": "Groq: Extract Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq: Extract Fields": {
+      "main": [
+        [
+          {
+            "node": "Parse + Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse + Validate": {
+      "main": [
+        [
+          {
+            "node": "Sheets: Append Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
